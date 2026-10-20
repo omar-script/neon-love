@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<meta name="theme-color" content="#080a18" />
+	<title>Neon Love — Canvas Experiment</title>
+	<style>
+		:root {
+			color-scheme: dark;
+			--cyan: #62f6ff;
+			--pink: #ff5edb;
+			--muted: rgba(224, 233, 255, .62);
+		}
+
+		* {
+			box-sizing: border-box;
+		}
+
+		html,
+		body {
+			width: 100%;
+			height: 100%;
+			margin: 0;
+			overflow: hidden;
+		}
+
+		body {
+			background: #080a18;
+			font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+			user-select: none;
+			-webkit-user-select: none;
+			-webkit-tap-highlight-color: transparent;
+		}
+
+		canvas {
+			position: fixed;
+			inset: 0;
+			display: block;
+			width: 100%;
+			height: 100%;
+			/* The page never scrolls, so let the canvas receive every touch move. */
+			touch-action: none;
+		}
+
+		.hud {
+			position: fixed;
+			inset: 0;
+			display: flex;
+			flex-direction: column;
+			justify-content: space-between;
+			padding: clamp(18px, 4vw, 38px);
+			pointer-events: none;
+		}
+
+		.brand {
+			display: inline-flex;
+			align-items: center;
+			gap: 11px;
+			width: fit-content;
+			color: rgba(238, 243, 255, .88);
+			font-size: 11px;
+			font-weight: 800;
+			letter-spacing: .2em;
+			text-transform: uppercase;
+		}
+
+		.brand-mark {
+			display: grid;
+			place-items: center;
+			width: 31px;
+			height: 31px;
+			border: 1px solid rgba(98, 246, 255, .45);
+			border-radius: 10px;
+			color: var(--cyan);
+			box-shadow: inset 0 0 18px rgba(98, 246, 255, .10), 0 0 22px rgba(98, 246, 255, .10);
+			font-size: 16px;
+		}
+
+		.footer {
+			display: flex;
+			align-items: end;
+			justify-content: space-between;
+			gap: 20px;
+			color: var(--muted);
+			font-size: 11px;
+			letter-spacing: .13em;
+			line-height: 1.7;
+			text-transform: uppercase;
+		}
+
+		.hint {
+			text-align: right;
+		}
+
+		.hint strong {
+			color: rgba(236, 242, 255, .9);
+			font-weight: 700;
+		}
+
+		.line {
+			display: inline-block;
+			width: 34px;
+			height: 1px;
+			margin: 0 8px 3px 0;
+			background: linear-gradient(90deg, var(--cyan), var(--pink));
+		}
+
+		@media (max-width: 540px) {
+			.footer {
+				align-items: start;
+				flex-direction: column;
+				gap: 8px;
+			}
+
+			.hint {
+				text-align: left;
+			}
+		}
+	</style>
+</head>
+
+<body>
+	<canvas role="img" aria-label="Interactive neon love animation. Move the pointer to leave a trail of hearts; click, tap, or press Enter to make it bloom."></canvas>
+
+	<div class="hud" aria-hidden="true">
+		<div class="brand"><span class="brand-mark">♥</span> Neon Love / Canvas No. 01</div>
+		<div class="footer">
+			<div><span class="line"></span> A little light, wherever you move.</div>
+			<div class="hint"><strong>Move</strong> to leave a trail<br /><strong>Click / Tap / Enter</strong> to make it bloom</div>
+		</div>
+	</div>
+
+	<script>
+		(() => {
+			'use strict';
+
+			const canvas = document.querySelector('canvas');
+			const ctx = canvas.getContext('2d', { alpha: false });
+			const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+			let reducedMotion = motionQuery.matches;
+			motionQuery.addEventListener?.('change', (e) => { reducedMotion = e.matches; });
+
+			const COLORS = ['#62f6ff', '#9b7bff', '#ff5edb', '#ff8c9d'];
+			const MAX_PARTICLES = 190;
+			const IDLE_DELAY = 3500; // ms before the heart starts drifting on its own
+
+			const random = (min, max) => Math.random() * (max - min) + min;
+			const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
+			let width = window.innerWidth;
+			let height = window.innerHeight;
+			let dpr = 1;
+			let lastTime = 0;
+			let lastTrailTime = 0;
+			let lastInteraction = 0;
+			let stars = [];
+			let backdrop = null; // cached gradient + grid
+			const particles = [];
+			const rings = [];
+
+			const pointer = {
+				x: width / 2, y: height / 2,
+				targetX: width / 2, targetY: height / 2,
+				active: false,
+				speed: 0
+			};
+
+			/* ---------- Heart shape + cached glow sprites ---------- */
+
+			function heartPath(c, size) {
+				c.beginPath();
+				c.moveTo(0, size * 0.35);
+				c.bezierCurveTo(-size * 1.15, -size * 0.35, -size * 0.55, -size * 1.05, 0, -size * 0.48);
+				c.bezierCurveTo(size * 0.55, -size * 1.05, size * 1.15, -size * 0.35, 0, size * 0.35);
+				c.closePath();
+			}
+
+			// shadowBlur is expensive per particle, so each colour's glowing heart is
+			// rendered once to an offscreen canvas and then stamped with drawImage.
+			const SPRITE_BASE = 16;
+			const SPRITE_SIZE = 96;
+			const sprites = new Map(COLORS.map((color) => {
+				const s = document.createElement('canvas');
+				s.width = s.height = SPRITE_SIZE;
+				const c = s.getContext('2d');
+				c.translate(SPRITE_SIZE / 2, SPRITE_SIZE / 2 + 3);
+				c.shadowColor = color;
+				c.shadowBlur = 14;
+				c.fillStyle = color;
+				heartPath(c, SPRITE_BASE);
+				c.fill();
+				return [color, s];
+			}));
+
+			/* ---------- Layout / cached backdrop ---------- */
+
+			function buildBackdrop() {
+				backdrop = document.createElement('canvas');
+				backdrop.width = Math.round(width * dpr);
+				backdrop.height = Math.round(height * dpr);
+				const b = backdrop.getContext('2d');
+				b.scale(dpr, dpr);
+
+				const bg = b.createLinearGradient(0, 0, width, height);
+				bg.addColorStop(0, '#070916');
+				bg.addColorStop(0.48, '#101126');
+				bg.addColorStop(1, '#170b24');
+				b.fillStyle = bg;
+				b.fillRect(0, 0, width, height);
+
+				b.strokeStyle = 'rgba(165, 190, 255, 0.035)';
+				b.lineWidth = 1;
+				const grid = 48;
+				b.beginPath();
+				for (let x = 0; x < width; x += grid) { b.moveTo(x + 0.5, 0); b.lineTo(x + 0.5, height); }
+				for (let y = 0; y < height; y += grid) { b.moveTo(0, y + 0.5); b.lineTo(width, y + 0.5); }
+				b.stroke();
+			}
+
+			function resize() {
+				width = window.innerWidth;
+				height = window.innerHeight;
+				dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+				canvas.width = Math.round(width * dpr);
+				canvas.height = Math.round(height * dpr);
+				ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+				const starCount = Math.min(150, Math.floor((width * height) / 8500));
+				stars = Array.from({ length: starCount }, () => ({
+					x: random(0, width),
+					y: random(0, height),
+					radius: random(0.45, 1.45),
+					phase: random(0, Math.PI * 2),
+					speed: random(0.5, 1.6)
+				}));
+
+				// Keep the pointer on-screen after a resize / rotation.
+				pointer.targetX = clamp(pointer.targetX, 0, width);
+				pointer.targetY = clamp(pointer.targetY, 0, height);
+
+				buildBackdrop();
+			}
+
+			/* ---------- Particles ---------- */
+
+			function addHeart(x, y, o = {}) {
+				if (particles.length >= MAX_PARTICLES) particles.shift();
+				const angle = o.angle ?? random(0, Math.PI * 2);
+				const speed = o.speed ?? random(0.45, 2.4);
+				const life = o.life ?? random(0.65, 1.3);
+				particles.push({
+					x, y,
+					vx: Math.cos(angle) * speed,
+					vy: Math.sin(angle) * speed - random(0.2, 1.1),
+					size: o.size ?? random(4, 11),
+					life, maxLife: life,
+					rotation: random(-0.6, 0.6),
+					spin: random(-1.5, 1.5),
+					color: COLORS[(Math.random() * COLORS.length) | 0]
+				});
+			}
+
+			function burst(x, y) {
+				const count = reducedMotion ? 12 : 32;
+				for (let i = 0; i < count; i++) {
+					addHeart(x, y, {
+						angle: (Math.PI * 2 * i) / count + random(-0.16, 0.16),
+						speed: random(1.1, 4.2),
+						size: random(4, 12),
+						life: random(0.7, 1.45)
+					});
+				}
+				rings.push({ x, y, radius: 5, life: 0.65, maxLife: 0.65 });
+			}
+
+			/* ---------- Drawing ---------- */
+
+			function drawBackground(time) {
+				ctx.drawImage(backdrop, 0, 0, width, height);
+
+				const gx = pointer.x, gy = pointer.y;
+				const glow = ctx.createRadialGradient(gx, gy, 0, gx, gy, Math.max(width, height) * 0.62);
+				glow.addColorStop(0, 'rgba(59, 214, 255, 0.095)');
+				glow.addColorStop(0.42, 'rgba(151, 68, 210, 0.045)');
+				glow.addColorStop(1, 'rgba(7, 9, 22, 0)');
+				ctx.fillStyle = glow;
+				ctx.fillRect(0, 0, width, height);
+
+				for (const star of stars) {
+					const twinkle = reducedMotion
+						? 0.4
+						: 0.25 + (Math.sin(time * 0.001 * star.speed + star.phase) + 1) * 0.3;
+					ctx.fillStyle = `rgba(211, 228, 255, ${twinkle.toFixed(3)})`;
+					ctx.beginPath();
+					ctx.arc(star.x, star.y, star.radius, 0, Math.PI * 2);
+					ctx.fill();
+				}
+			}
+
+			function drawParticles(dt) {
+				const f = dt * 60;
+				const damping = Math.pow(0.985, f);
+				for (let i = particles.length - 1; i >= 0; i--) {
+					const p = particles[i];
+					p.life -= dt;
+					if (p.life <= 0) { particles.splice(i, 1); continue; }
+
+					p.x += p.vx * f;
+					p.y += p.vy * f;
+					p.vy -= 0.006 * f;
+					p.vx *= damping;
+					p.vy *= damping;
+					p.rotation += p.spin * dt;
+
+					const scale = p.size / SPRITE_BASE;
+					ctx.save();
+					ctx.translate(p.x, p.y);
+					ctx.rotate(p.rotation);
+					ctx.scale(scale, scale);
+					ctx.globalAlpha = clamp(p.life / p.maxLife, 0, 1);
+					ctx.drawImage(sprites.get(p.color), -SPRITE_SIZE / 2, -SPRITE_SIZE / 2);
+					ctx.restore();
+				}
+			}
+
+			function drawRings(dt) {
+				for (let i = rings.length - 1; i >= 0; i--) {
+					const r = rings[i];
+					r.life -= dt;
+					r.radius += 100 * dt;
+					if (r.life <= 0) { rings.splice(i, 1); continue; }
+					ctx.save();
+					ctx.globalAlpha = r.life / r.maxLife;
+					ctx.strokeStyle = '#7cf7ff';
+					ctx.lineWidth = 1.5;
+					ctx.shadowColor = '#7cf7ff';
+					ctx.shadowBlur = 12;
+					ctx.beginPath();
+					ctx.arc(r.x, r.y, r.radius, 0, Math.PI * 2);
+					ctx.stroke();
+					ctx.restore();
+				}
+			}
+
+			function drawPointer(time) {
+				const x = pointer.x, y = pointer.y;
+				const pulse = 1 + Math.sin(time * 0.003) * 0.06;
+				const fontSize = clamp(Math.min(width, height) * 0.105, 42, 82);
+
+				ctx.save();
+				ctx.textAlign = 'left';
+				ctx.textBaseline = 'middle';
+				ctx.font = `800 ${fontSize}px ui-rounded, system-ui, sans-serif`;
+				ctx.shadowColor = '#ff5edb';
+				ctx.shadowBlur = 30;
+
+				const gradient = ctx.createLinearGradient(x - 110, y - 20, x + 110, y + 20);
+				gradient.addColorStop(0, '#70f8ff');
+				gradient.addColorStop(0.48, '#d9a3ff');
+				gradient.addColorStop(1, '#ff69d9');
+				ctx.fillStyle = gradient;
+
+				// "I ♥ U" — the heart is drawn as a shape so it looks identical on every
+				// device (the ♥ glyph is swapped for a colour emoji on some systems).
+				const gap = fontSize * 0.28;
+				const heartSize = fontSize * 0.42;
+				const wI = ctx.measureText('I').width;
+				const wU = ctx.measureText('U').width;
+				const heartW = heartSize * 1.6;
+				const total = wI + gap + heartW + gap + wU;
+				const left = x - total / 2;
+				const ty = y - fontSize * 0.1;
+
+				ctx.fillText('I', left, ty);
+				ctx.fillText('U', left + wI + gap + heartW + gap, ty);
+
+				ctx.save();
+				ctx.translate(left + wI + gap + heartW / 2, ty + heartSize * 0.1);
+				ctx.scale(pulse, pulse);
+				heartPath(ctx, heartSize);
+				ctx.fill();
+				ctx.restore();
+
+				ctx.shadowBlur = 0;
+				ctx.globalAlpha = 0.7;
+				ctx.textAlign = 'center';
+				ctx.font = `600 ${clamp(fontSize * 0.15, 9, 12)}px system-ui, sans-serif`;
+				ctx.fillStyle = '#e7eaff';
+				if ('letterSpacing' in ctx) ctx.letterSpacing = '0.24em';
+				ctx.fillText('YOU MAKE THE WORLD GLOW', x, y + fontSize * 0.62);
+				ctx.restore();
+
+				// Fine orbit ring around the pointer.
+				ctx.save();
+				ctx.translate(x, y);
+				ctx.rotate(time * 0.00025);
+				ctx.scale(pulse, pulse);
+				ctx.strokeStyle = 'rgba(119, 240, 255, 0.65)';
+				ctx.lineWidth = 1;
+				ctx.setLineDash([3, 8]);
+				ctx.shadowColor = '#62f6ff';
+				ctx.shadowBlur = 10;
+				ctx.beginPath();
+				ctx.arc(0, 0, 40, 0, Math.PI * 2);
+				ctx.stroke();
+				ctx.restore();
+			}
+
+			/* ---------- Main loop ---------- */
+
+			function animate(time = 0) {
+				const dt = Math.min((time - lastTime) / 1000 || 0, 0.033);
+				lastTime = time;
+
+				// When nobody is interacting, drift gently so the scene never looks frozen.
+				if (!reducedMotion && time - lastInteraction > IDLE_DELAY) {
+					pointer.targetX = width / 2 + Math.cos(time * 0.0004) * width * 0.22;
+					pointer.targetY = height / 2 + Math.sin(time * 0.0007) * height * 0.15;
+					pointer.active = true;
+				}
+
+				const easing = reducedMotion ? 1 : 1 - Math.pow(0.001, dt || 0.016);
+				const oldX = pointer.x, oldY = pointer.y;
+				pointer.x += (pointer.targetX - pointer.x) * easing;
+				pointer.y += (pointer.targetY - pointer.y) * easing;
+				pointer.speed = Math.hypot(pointer.x - oldX, pointer.y - oldY);
+
+				if (!reducedMotion && pointer.active && time - lastTrailTime > 28 && pointer.speed > 0.2) {
+					addHeart(pointer.x + random(-5, 5), pointer.y + random(-5, 5), {
+						size: random(3, 7),
+						speed: random(0.25, 1.05),
+						life: random(0.45, 0.9)
+					});
+					lastTrailTime = time;
+				}
+
+				drawBackground(time);
+				drawParticles(dt);
+				drawRings(dt);
+				drawPointer(time);
+				requestAnimationFrame(animate);
+			}
+
+			/* ---------- Input ---------- */
+
+			function touchInteraction() {
+				lastInteraction = performance.now();
+			}
+
+			window.addEventListener('pointermove', (e) => {
+				pointer.targetX = e.clientX;
+				pointer.targetY = e.clientY;
+				pointer.active = true;
+				touchInteraction();
+			}, { passive: true });
+
+			window.addEventListener('pointerdown', (e) => {
+				pointer.targetX = e.clientX;
+				pointer.targetY = e.clientY;
+				pointer.active = true;
+				touchInteraction();
+				burst(e.clientX, e.clientY);
+			}, { passive: true });
+
+			// Stop the trail when the cursor leaves the page (mouse only).
+			document.documentElement.addEventListener('pointerleave', (e) => {
+				if (e.pointerType === 'mouse') pointer.active = false;
+			});
+
+			// Keyboard access: Enter / Space makes the heart bloom.
+			window.addEventListener('keydown', (e) => {
+				if ((e.key === 'Enter' || e.key === ' ') && !e.repeat) {
+					e.preventDefault();
+					touchInteraction();
+					burst(pointer.x, pointer.y);
+				}
+			});
+
+			window.addEventListener('resize', resize, { passive: true });
+
+			// Avoid a huge time-step (and a burst of particles) when returning to the tab.
+			document.addEventListener('visibilitychange', () => {
+				lastTime = performance.now();
+			});
+
+			resize();
+			requestAnimationFrame(animate);
+		})();
+	</script>
+</body>
+
+</html>
